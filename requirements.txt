@@ -1,0 +1,12 @@
+torch
+torchvision
+transformers>=4.51
+accelerate
+peft
+safetensors
+numpy
+pillow
+tqdm
+decord
+pyarrow
+tensorboard
