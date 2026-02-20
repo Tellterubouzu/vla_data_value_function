@@ -188,7 +188,10 @@ class AiroaMomaValueFrameDataset(Dataset):
         if not video_path.exists():
             raise FileNotFoundError(f"Video file not found: {video_path}")
 
-        total_frames = cache.get_num_frames(video_path)
+        try:
+            total_frames = cache.get_num_frames(video_path)
+        except Exception as exc:
+            raise RuntimeError(f"Failed opening video file: {video_path}. cause={exc}") from exc
         if total_frames <= 0:
             raise RuntimeError(f"Video has no frames: {video_path}")
 

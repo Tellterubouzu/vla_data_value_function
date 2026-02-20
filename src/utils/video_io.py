@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 from PIL import Image
@@ -21,34 +21,46 @@ class VideoReaderCache:
         if max_size <= 0:
             raise ValueError(f"max_size must be > 0, got {max_size}")
         self.max_size = int(max_size)
-        self.backend = self._choose_backend()
-        self._cache: "OrderedDict[str, Any]" = OrderedDict()
+        self.backends = self._choose_backends()
+        # cache value: (backend, reader_object)
+        self._cache: "OrderedDict[str, Tuple[str, Any]]" = OrderedDict()
 
-    def _choose_backend(self) -> str:
+    def _choose_backends(self) -> List[str]:
+        backends: List[str] = []
         try:
             import decord  # noqa: F401
 
-            return "decord"
+            backends.append("decord")
         except Exception:
             pass
 
         try:
             from torchvision.io import read_video  # noqa: F401
 
-            return "torchvision"
+            backends.append("torchvision")
         except Exception:
             pass
 
-        raise ModuleNotFoundError(
-            "No video decoder backend available. Install decord (preferred) or torchvision."
-        )
+        if not backends:
+            raise ModuleNotFoundError(
+                "No video decoder backend available. Install decord (preferred) or torchvision."
+            )
+        return backends
 
     def _evict_if_needed(self) -> None:
         while len(self._cache) > self.max_size:
             self._cache.popitem(last=False)
 
-    def _open_reader(self, video_path: Path) -> Any:
-        if self.backend == "decord":
+    def _is_lfs_pointer_file(self, video_path: Path) -> bool:
+        try:
+            with video_path.open("rb") as f:
+                head = f.read(256)
+        except Exception:
+            return False
+        return head.startswith(b"version https://git-lfs.github.com/spec/v1")
+
+    def _open_with_backend(self, backend: str, video_path: Path) -> Any:
+        if backend == "decord":
             import decord
 
             return decord.VideoReader(str(video_path), ctx=decord.cpu(0))
@@ -62,31 +74,50 @@ class VideoReaderCache:
             frames, _, _ = read_video(str(video_path), pts_unit="sec")
         return frames
 
-    def _get_reader(self, video_path: Path) -> Any:
-        key = str(video_path)
-        reader = self._cache.get(key)
-        if reader is not None:
-            self._cache.move_to_end(key)
-            return reader
+    def _open_reader(self, video_path: Path) -> Tuple[str, Any]:
+        if self._is_lfs_pointer_file(video_path):
+            raise RuntimeError(
+                f"Video file is a Git LFS pointer (not actual MP4): {video_path}. "
+                "Run 'git lfs pull' in the dataset directory."
+            )
 
-        reader = self._open_reader(video_path)
-        self._cache[key] = reader
+        errors: List[str] = []
+        for backend in self.backends:
+            try:
+                return backend, self._open_with_backend(backend=backend, video_path=video_path)
+            except Exception as exc:
+                errors.append(f"{backend}: {exc}")
+
+        raise RuntimeError(
+            f"Failed to open video file with all available backends: {video_path}. "
+            f"backend_errors={errors}"
+        )
+
+    def _get_reader(self, video_path: Path) -> Tuple[str, Any]:
+        key = str(video_path)
+        cached = self._cache.get(key)
+        if cached is not None:
+            self._cache.move_to_end(key)
+            return cached
+
+        opened = self._open_reader(video_path)
+        self._cache[key] = opened
         self._cache.move_to_end(key)
         self._evict_if_needed()
-        return reader
+        return opened
 
     def get_num_frames(self, video_path: Path) -> int:
-        reader = self._get_reader(video_path)
-        if self.backend == "decord":
+        backend, reader = self._get_reader(video_path)
+        if backend == "decord":
             return int(len(reader))
 
         # torchvision tensor path.
         return int(reader.shape[0])
 
     def read_frame(self, video_path: Path, frame_index: int) -> Image.Image:
-        reader = self._get_reader(video_path)
+        backend, reader = self._get_reader(video_path)
 
-        if self.backend == "decord":
+        if backend == "decord":
             n_frames = int(len(reader))
             if n_frames <= 0:
                 raise RuntimeError(f"No frame found in video: {video_path}")
