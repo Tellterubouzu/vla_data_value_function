@@ -82,7 +82,9 @@ class Siglip2Gemma3Backbone(nn.Module):
             self.text_tokenizer.pad_token = self.text_tokenizer.eos_token
 
         self.vision_model = AutoModel.from_pretrained(vision_model_id)
-        self.text_model = AutoModel.from_pretrained(text_model_id)
+        # Gemma checkpoints are causal-LM style; loading via AutoModel may leave large
+        # portions randomly initialized. Use CausalLM and pull hidden states.
+        self.text_model = AutoModelForCausalLM.from_pretrained(text_model_id)
 
         vision_dim = self._infer_vision_dim()
         text_dim = self._infer_text_dim()
@@ -134,9 +136,13 @@ class Siglip2Gemma3Backbone(nn.Module):
         text_outputs = self.text_model(
             input_ids=input_ids,
             attention_mask=attention_mask,
+            output_hidden_states=True,
             return_dict=True,
         )
-        text_hidden = text_outputs.last_hidden_state
+        hidden_states = getattr(text_outputs, "hidden_states", None)
+        if not hidden_states:
+            raise RuntimeError("Text model output does not contain hidden_states")
+        text_hidden = hidden_states[-1]
         text_feat = get_last_nonpad_hidden(text_hidden, attention_mask)
 
         h_img = self.img_proj(torch.cat([head_feat, hand_feat], dim=-1))
