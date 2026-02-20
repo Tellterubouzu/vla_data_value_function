@@ -65,14 +65,13 @@ class VideoReaderCache:
 
             return decord.VideoReader(str(video_path), ctx=decord.cpu(0))
 
-        # torchvision fallback: cache full decoded tensor for the file.
-        from torchvision.io import read_video
+        # torchvision fallback: keep only timestamps/fps metadata in cache.
+        # Decoding full video tensors here can easily OOM DataLoader workers.
+        from torchvision.io import read_video_timestamps
 
-        try:
-            frames, _, _ = read_video(str(video_path), pts_unit="sec", output_format="THWC")
-        except TypeError:
-            frames, _, _ = read_video(str(video_path), pts_unit="sec")
-        return frames
+        pts_sec, fps = read_video_timestamps(str(video_path), pts_unit="sec")
+        fps_val = float(fps) if fps is not None else 30.0
+        return {"pts_sec": list(pts_sec), "fps": max(fps_val, 1.0)}
 
     def _open_reader(self, video_path: Path) -> Tuple[str, Any]:
         if self._is_lfs_pointer_file(video_path):
@@ -111,8 +110,8 @@ class VideoReaderCache:
         if backend == "decord":
             return int(len(reader))
 
-        # torchvision tensor path.
-        return int(reader.shape[0])
+        pts_sec = reader.get("pts_sec", [])
+        return int(len(pts_sec))
 
     def read_frame(self, video_path: Path, frame_index: int) -> Image.Image:
         backend, reader = self._get_reader(video_path)
@@ -125,12 +124,63 @@ class VideoReaderCache:
             frame = reader[index].asnumpy()
             return _to_pil_rgb(frame)
 
-        n_frames = int(reader.shape[0])
+        # torchvision path: decode around target timestamp only.
+        n_frames = int(len(reader.get("pts_sec", [])))
         if n_frames <= 0:
             raise RuntimeError(f"No frame found in video: {video_path}")
 
         index = int(np.clip(frame_index, 0, n_frames - 1))
-        frame = reader[index]
+        pts_sec = reader["pts_sec"]
+        fps = float(reader.get("fps", 30.0))
+        target_ts = float(pts_sec[index])
+
+        if index + 1 < n_frames:
+            end_ts = float(pts_sec[index + 1])
+            if end_ts <= target_ts:
+                end_ts = target_ts + (1.0 / fps)
+        else:
+            end_ts = target_ts + (1.0 / fps)
+
+        from torchvision.io import read_video
+
+        try:
+            frames, _, _ = read_video(
+                str(video_path),
+                start_pts=target_ts,
+                end_pts=end_ts,
+                pts_unit="sec",
+                output_format="THWC",
+            )
+        except TypeError:
+            frames, _, _ = read_video(
+                str(video_path),
+                start_pts=target_ts,
+                end_pts=end_ts,
+                pts_unit="sec",
+            )
+
+        if int(frames.shape[0]) <= 0:
+            # Fallback: decode from target to end when short intervals return empty.
+            try:
+                frames, _, _ = read_video(
+                    str(video_path),
+                    start_pts=target_ts,
+                    end_pts=None,
+                    pts_unit="sec",
+                    output_format="THWC",
+                )
+            except TypeError:
+                frames, _, _ = read_video(
+                    str(video_path),
+                    start_pts=target_ts,
+                    end_pts=None,
+                    pts_unit="sec",
+                )
+
+        if int(frames.shape[0]) <= 0:
+            raise RuntimeError(f"Failed to decode any frame from video: {video_path} at ts={target_ts}")
+
+        frame = frames[0]
         if hasattr(frame, "cpu"):
             frame = frame.cpu()
         if hasattr(frame, "numpy"):
