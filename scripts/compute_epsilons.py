@@ -29,7 +29,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out", type=str, required=True)
     parser.add_argument("--split", type=str, choices=["train", "val", "all"], default="val")
     parser.add_argument("--batch_size", type=int, default=4)
-    parser.add_argument("--num_workers", type=int, default=4)
+    parser.add_argument("--num_workers", type=int, default=2)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--precision", type=str, choices=["auto", "bf16", "fp16", "fp32"], default="auto")
     return parser.parse_args()

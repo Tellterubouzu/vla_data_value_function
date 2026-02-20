@@ -51,7 +51,7 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--max_text_length", type=int, default=128)
     parser.add_argument("--output_dir", type=str, required=True)
-    parser.add_argument("--num_workers", type=int, default=4)
+    parser.add_argument("--num_workers", type=int, default=2)
     parser.add_argument("--seed", type=int, default=42)
 
     parser.add_argument("--precision", type=str, choices=["auto", "bf16", "fp16", "fp32"], default="auto")
